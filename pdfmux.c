@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <mupdf/fitz.h>
 #include <vulkan/vulkan.h>
 
@@ -28,10 +29,13 @@ main(void)
 
 	fz_matrix ctm = fz_scale(1, 1);
 	ctm = fz_pre_rotate(ctm, 0);
-	
-	pix = fz_new_pixmap_from_page_number(ctx, doc, page_number, ctm, fz_device_rgb(ctx), 0);
 
-	fz_save_pixmap_as_png(ctx, pix, "out.png");
+	for (int i = 0; i < page_count; i++) {
+		char str[50];
+		snprintf(str, sizeof(str), "out/out%d.png", i);
+		pix = fz_new_pixmap_from_page_number(ctx, doc, i, ctm, fz_device_rgb(ctx), 0);
+		fz_save_pixmap_as_png(ctx, pix, str);
+	}
 	
 	fz_drop_pixmap(ctx, pix);
 	fz_drop_page(ctx, page);
