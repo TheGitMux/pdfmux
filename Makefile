@@ -4,7 +4,7 @@ BASE_C_GLOBS = $(wildcard *.c)
 BASE_OBJ_GLOBS = $(BASE_C_GLOBS:.c=.o)
 
 CFLAGS = -Os -g -Werror
-LDFLAGS = -ldjvulibre -lmupdf -lSDL -lm -ljpeg -lfreetype -lz -lharfbuzz -lmupdf-third -ljbig2dec -lgumbo -lopenjp2 -lxcb -lvulkan -lxcb -lxcb-image
+LDFLAGS = `pkg-config --libs pdfio xcb libpng xcb-cursor xcb-image xcb-keysyms`
 
 CC_CMD = $(CC) -c -o $@ $< $(CFLAGS)
 LD_CMD = $(CC) -o $@ $< $(LDFLAGS)

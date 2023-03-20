@@ -1,151 +1,131 @@
-#include <stdio.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
-#include <mupdf/fitz.h>
-#include <vulkan/vulkan.h>
 #include <xcb/xcb.h>
-#include <xcb/xcb_image.h>
+#include <xcb/xcb_keysyms.h>
+#include <xcb/xcb_cursor.h>
 
-static uint32_t *px, pc;
-static uint32_t color;
-static uint32_t width, height;
-static xcb_connection_t* c;
-static xcb_gcontext_t gc;
-static xcb_image_t* image;
-static xcb_screen_t* scrn;
-static xcb_window_t window;
-
-static int page_count, page_number = 0;
-
-static fz_context* ctx;
-static fz_document* doc;
-static fz_matrix ctm;
-static fz_page* page;
-static fz_pixmap* pix;
-
-static void fz_cleanup(fz_context* ctx, fz_page* page, fz_document* doc, fz_pixmap* pix);
-static void create_window(void);
-static void delete_window(void);
+static xcb_connection_t* conn;
+static xcb_screen_t* scr;
+static xcb_window_t win;
+static xcb_key_symbols_t* ksyms;
+static xcb_cursor_context_t* cctx;
+static xcb_cursor_t cursor_hand;
+static xcb_cursor_t cursor_crosshair;
 
 static void
-fz_cleanup(fz_context* ctx, fz_page* page, fz_document* doc, fz_pixmap* pix)
+die(const char* msg)
 {
-	fz_drop_pixmap(ctx, pix);
-	fz_drop_page(ctx, page);
-	fz_drop_document(ctx, doc);
-	fz_drop_context(ctx);
+	fprintf(stderr, "%s\n", msg);
 }
 
 static xcb_atom_t
-get_atom(const char* name)
+get_x11_atom(const char* name)
 {
 	xcb_atom_t atom;
 	xcb_generic_error_t* error;
 	xcb_intern_atom_cookie_t cookie;
 	xcb_intern_atom_reply_t* reply;
 
-	cookie = xcb_intern_atom(c, 0, strlen(name), name);
-	reply = xcb_intern_atom_reply(c, cookie, &error);
+	cookie = xcb_intern_atom(conn, 0, strlen(name), name);
+	reply = xcb_intern_atom_reply(conn, cookie, &error);
 
-	if (error != NULL) {
-		fprintf(stderr, "Error: xcb_intern_atom(): %d\n", (int)(error->error_code));
+	if (NULL != error) {
+		fprintf(stderr, "xcb_intern_atom() failed with error code: %hhu",
+		    error->error_code);
 	}
 
 	atom = reply->atom;
 	free(reply);
+
 	return atom;
 }
 
 static void
-create_window(void)
+xwininit(void)
 {
-	c = xcb_connect(NULL, NULL);
-	if (xcb_connection_has_error(c)) {
-		fprintf(stderr, "Error: xcb_connect()\n");
-	}
-	
-	scrn = xcb_setup_roots_iterator(xcb_get_setup(c)).data;
-	if (scrn == NULL) {
-		fprintf(stderr, "Error: xcb_screen_roots_iterator()\n");
-	}
+	const char *wm_class, *wm_name;
 
-	width = height = 600;
-	pc = (width * height);
+	xcb_atom_t _NET_WM_NAME, _NET_WM_STATE, _NET_WM_STATE_FULLSCREEN, _NET_WM_WINDOW_OPACITY;
 
-	px = malloc(sizeof(uint32_t) * pc);
-	if (px == NULL) {
-		fprintf(stderr, "Error: malloc()\n");
+	xcb_atom_t WM_PROTOCOLS, WM_DELETE_WINDOW;
+
+	xcb_atom_t UTF8_STRING;
+
+	uint8_t opacity[4];
+
+	conn = xcb_connect(NULL, NULL);
+
+	if (xcb_connection_has_error(conn)) {
+		die("Cannot open display\n");
 	}
 
-	window = xcb_generate_id(c);
-	gc = xcb_generate_id(c);
+	scr = xcb_setup_roots_iterator(xcb_get_setup(conn)).data;
 
-	xcb_create_window_aux(c, XCB_COPY_FROM_PARENT, window, scrn->root, 0,
-			      0, width, height, 0, XCB_WINDOW_CLASS_INPUT_OUTPUT,
-			      scrn->root_visual, XCB_CW_EVENT_MASK,
-			      (const xcb_create_window_value_list_t []) {{
-					      .event_mask = XCB_EVENT_MASK_EXPOSURE |
-						      XCB_EVENT_MASK_KEY_PRESS |
-						      XCB_EVENT_MASK_STRUCTURE_NOTIFY
-				      }}
+	if (NULL == scr) {
+		die("Can't get default screen.");
+	}
+
+	if (xcb_cursor_context_new(conn, scr, &cctx) != 0) {
+		die("Cannot create cursor context");
+	}
+
+	cursor_hand = xcb_cursor_load_cursor(cctx, "fleur");
+	cursor_crosshair = xcb_cursor_load_cursor(cctx, "crosshair");
+	ksyms = xcb_key_symbols_alloc(conn);
+	win = xcb_generate_id(conn);
+
+	xcb_create_window_aux(
+		conn, scr->root_depth, win, scr->root, 0, 0,
+		800, 800, 0, XCB_WINDOW_CLASS_INPUT_OUTPUT,
+		scr->root_visual, XCB_CW_BACK_PIXEL | XCB_CW_EVENT_MASK,
+		(const xcb_create_window_value_list_t []) {{
+				.background_pixel = 0x0e0e0e,
+				.event_mask = XCB_EVENT_MASK_EXPOSURE |
+				XCB_EVENT_MASK_KEY_PRESS |
+				XCB_EVENT_MASK_BUTTON_PRESS |
+				XCB_EVENT_MASK_BUTTON_RELEASE |
+				XCB_EVENT_MASK_POINTER_MOTION |
+				XCB_EVENT_MASK_STRUCTURE_NOTIFY
+			}}
 		);
 
-	xcb_create_gc(c, gc, window, 0, NULL);
+	_NET_WM_NAME = get_x11_atom("_NET_WM_NAME");
+	UTF8_STRING = get_x11_atom("UTF8_STRING");
+	wm_name = "pdfmux";
 
-	image = xcb_image_create_native(c, width, height, XCB_IMAGE_FORMAT_Z_PIXMAP,
-					scrn->root_depth, px, (sizeof(uint32_t) * pc),
-					(uint8_t *)(px));
+	xcb_change_property(conn, XCB_PROP_MODE_REPLACE, win,
+			    _NET_WM_NAME, UTF8_STRING, 8, strlen(wm_name), wm_name);
 
-	xcb_change_property(c, XCB_PROP_MODE_REPLACE, window, get_atom("_NET_WM_NAME"),
-			    get_atom("UTF8_STRING"), 8, strlen("xcbsimple"), "xcbsimple");
+	wm_class = "pdfmux\0pdfmux\0";
+	xcb_change_property(conn, XCB_PROP_MODE_REPLACE, win, XCB_ATOM_WM_CLASS,
+			    XCB_ATOM_STRING, 8, strlen(wm_class), wm_class);
 
-	xcb_change_property(c, XCB_PROP_MODE_REPLACE, window, XCB_ATOM_WM_CLASS,
-			    XCB_ATOM_STRING, 8, strlen("xcbsimple\0xcbsimple\0"),
-			    "xcbsimple\0xcbsimple\0");
+	WM_PROTOCOLS = get_x11_atom("WM_PROTOCOLS");
+	WM_DELETE_WINDOW = get_x11_atom("WM_DELETE_WINDOW");
 
-	xcb_change_property(c, XCB_PROP_MODE_REPLACE, window, get_atom("WM_PROTOCOLS"),
-			    XCB_ATOM_ATOM, 32, 1, (const xcb_atom_t []) { get_atom("WM_DELETE_WINDOW") });
+	xcb_change_property(conn, XCB_PROP_MODE_REPLACE, win,
+			    WM_PROTOCOLS, XCB_ATOM_ATOM, 32, 1, &WM_DELETE_WINDOW);
 
-	xcb_change_property(c, XCB_PROP_MODE_REPLACE, window, get_atom("_NET_WM_STATE"),
-			    XCB_ATOM_ATOM, 32, 1, (const xcb_atom_t []) { get_atom("_NET_WM_STATE_FULLSCREEN") });
-	
-	xcb_map_window(c, window);
-	xcb_flush(c);
-}
+	_NET_WM_WINDOW_OPACITY = get_x11_atom("_NET_WM_WINDOW_OPACITY");
+	opacity[0] = opacity[1] = opacity[2] = opacity[3] = 0xff;
 
-static void
-delete_window(void)
-{
-	xcb_free_gc(c, gc);
-	xcb_image_destroy(image);
-	xcb_disconnect(c);
+	xcb_change_property(conn, XCB_PROP_MODE_REPLACE, win,
+			    _NET_WM_WINDOW_OPACITY, XCB_ATOM_CARDINAL, 32, 1, opacity);
+
+	_NET_WM_STATE = get_x11_atom("_NET_WM_STATE");
+	_NET_WM_STATE_FULLSCREEN = get_x11_atom("_NET_WM_STATE_FULLSCREEN");
+	xcb_change_property(conn, XCB_PROP_MODE_REPLACE, win,
+			    _NET_WM_STATE, XCB_ATOM_ATOM, 32, 1, &_NET_WM_STATE_FULLSCREEN);
+
+	xcb_change_window_attributes(conn, win, XCB_CW_CURSOR, &cursor_crosshair);
+	xcb_map_window(conn, win);
+	xcb_flush(conn);
 }
 
 int
 main(void)
 {
-	create_window();
-
-	ctx = fz_new_context(NULL, NULL, FZ_STORE_DEFAULT);
-	fz_register_document_handlers(ctx);
-	doc = fz_open_document(ctx, "auug97.pdf");
-
-	page = fz_load_page(ctx, doc, 1);
-	page_count = fz_count_pages(ctx, doc);
-	printf("Page count: %d\n", page_count);
-
-	ctm = fz_scale(1, 1);
-	ctm = fz_pre_rotate(ctm, 0);
-
-	for (int i = 0; i < page_count; i++) {
-		char str[50];
-		snprintf(str, sizeof(str), "out/out%d.png", i);
-		pix = fz_new_pixmap_from_page_number(ctx, doc, i, ctm, fz_device_rgb(ctx), 0);
-		fz_save_pixmap_as_png(ctx, pix, str);
-	}
-
-	fz_cleanup(ctx, page, doc, pix);
-	delete_window();
-	
+	xwininit();
 	return 0;
 }
