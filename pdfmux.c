@@ -1,131 +1,133 @@
+#include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+
+#include <xf86drm.h>
+#include <xf86drmMode.h>
+#include <png.h>
+
 #include <xcb/xcb.h>
-#include <xcb/xcb_keysyms.h>
-#include <xcb/xcb_cursor.h>
+#include <vulkan/vulkan.h>
+#define VK_USE_PLATFORM_XCB_KHR
+#define MAX_NUM_IMAGES 5
 
-static xcb_connection_t* conn;
-static xcb_screen_t* scr;
-static xcb_window_t win;
-static xcb_key_symbols_t* ksyms;
-static xcb_cursor_context_t* cctx;
-static xcb_cursor_t cursor_hand;
-static xcb_cursor_t cursor_crosshair;
+struct vkcube_buffer {
+	struct gbm_bo *gbm_bo;
+	VkDeviceMemory mem;
+	VkImage image;
+	VkImageView view;
+	VkFramebuffer framebuffer;
+	VkFence fence;
+	VkCommandBuffer cmd_buffer;
 
-static void
-die(const char* msg)
-{
-	fprintf(stderr, "%s\n", msg);
-}
+	uint32_t fb;
+	uint32_t stride;
+};
+
+struct pdf {
+	xcb_connection_t	*conn;
+	xcb_window_t		window;
+	xcb_atom_t		atom_wm_protocols;
+	xcb_atom_t		atom_wm_delete_window;
+
+	bool			protected;
+
+	struct {
+		VkDisplayModeKHR display_mode;
+	} khr;
+
+	VkSwapchainKHR		swap_chain;
+
+	drmModeCrtc		*crtc;
+	drmModeConnector	*connector;
+	uint32_t width, height;
+
+	VkInstance instance;
+	VkPhysicalDevice physical_device;
+	VkPhysicalDeviceMemoryProperties	memory_properties;
+	VkDevice device;
+	VkRenderPass render_pass;
+	VkQueue queue;
+	VkPipelineLayout pipeline_layout;
+	VkPipeline pipeline;
+	VkDeviceMemory mem;
+	VkBuffer buffer;
+	VkDescriptorSet descriptor_set;
+	VkSemaphore sempahore;
+	VkCommandPool cmd_pool;
+
+	void *map;
+	uint32_t vertex_offset, colors_offset, normals_offset;
+
+	struct timeval start_tv;
+	VkSurfaceKHR surface;
+	VkFormat image_format;
+	struct vkcube_buffer buffers[MAX_NUM_IMAGES];
+	uint32_t image_count;
+	int current;
+};
 
 static xcb_atom_t
-get_x11_atom(const char* name)
+get_atom(struct xcb_connection_t *conn, const char *name)
 {
-	xcb_atom_t atom;
-	xcb_generic_error_t* error;
-	xcb_intern_atom_cookie_t cookie;
-	xcb_intern_atom_reply_t* reply;
+	xcb_intern_atom_cookie_t	cookie;
+	xcb_intern_atom_reply_t		*reply;
+	xcb_atom_t			atom;
 
 	cookie = xcb_intern_atom(conn, 0, strlen(name), name);
-	reply = xcb_intern_atom_reply(conn, cookie, &error);
-
-	if (NULL != error) {
-		fprintf(stderr, "xcb_intern_atom() failed with error code: %hhu",
-		    error->error_code);
+	reply = xcb_intern_atom_reply(conn, cookie, NULL);
+	if (reply) {
+		atom = reply->atom;
+	} else {
+		atom = XCB_NONE;
 	}
 
-	atom = reply->atom;
 	free(reply);
-
 	return atom;
 }
 
-static void
-xwininit(void)
-{
-	const char *wm_class, *wm_name;
-
-	xcb_atom_t _NET_WM_NAME, _NET_WM_STATE, _NET_WM_STATE_FULLSCREEN, _NET_WM_WINDOW_OPACITY;
-
-	xcb_atom_t WM_PROTOCOLS, WM_DELETE_WINDOW;
-
-	xcb_atom_t UTF8_STRING;
-
-	uint8_t opacity[4];
-
-	conn = xcb_connect(NULL, NULL);
-
-	if (xcb_connection_has_error(conn)) {
-		die("Cannot open display\n");
-	}
-
-	scr = xcb_setup_roots_iterator(xcb_get_setup(conn)).data;
-
-	if (NULL == scr) {
-		die("Can't get default screen.");
-	}
-
-	if (xcb_cursor_context_new(conn, scr, &cctx) != 0) {
-		die("Cannot create cursor context");
-	}
-
-	cursor_hand = xcb_cursor_load_cursor(cctx, "fleur");
-	cursor_crosshair = xcb_cursor_load_cursor(cctx, "crosshair");
-	ksyms = xcb_key_symbols_alloc(conn);
-	win = xcb_generate_id(conn);
-
-	xcb_create_window_aux(
-		conn, scr->root_depth, win, scr->root, 0, 0,
-		800, 800, 0, XCB_WINDOW_CLASS_INPUT_OUTPUT,
-		scr->root_visual, XCB_CW_BACK_PIXEL | XCB_CW_EVENT_MASK,
-		(const xcb_create_window_value_list_t []) {{
-				.background_pixel = 0x0e0e0e,
-				.event_mask = XCB_EVENT_MASK_EXPOSURE |
-				XCB_EVENT_MASK_KEY_PRESS |
-				XCB_EVENT_MASK_BUTTON_PRESS |
-				XCB_EVENT_MASK_BUTTON_RELEASE |
-				XCB_EVENT_MASK_POINTER_MOTION |
-				XCB_EVENT_MASK_STRUCTURE_NOTIFY
-			}}
-		);
-
-	_NET_WM_NAME = get_x11_atom("_NET_WM_NAME");
-	UTF8_STRING = get_x11_atom("UTF8_STRING");
-	wm_name = "pdfmux";
-
-	xcb_change_property(conn, XCB_PROP_MODE_REPLACE, win,
-			    _NET_WM_NAME, UTF8_STRING, 8, strlen(wm_name), wm_name);
-
-	wm_class = "pdfmux\0pdfmux\0";
-	xcb_change_property(conn, XCB_PROP_MODE_REPLACE, win, XCB_ATOM_WM_CLASS,
-			    XCB_ATOM_STRING, 8, strlen(wm_class), wm_class);
-
-	WM_PROTOCOLS = get_x11_atom("WM_PROTOCOLS");
-	WM_DELETE_WINDOW = get_x11_atom("WM_DELETE_WINDOW");
-
-	xcb_change_property(conn, XCB_PROP_MODE_REPLACE, win,
-			    WM_PROTOCOLS, XCB_ATOM_ATOM, 32, 1, &WM_DELETE_WINDOW);
-
-	_NET_WM_WINDOW_OPACITY = get_x11_atom("_NET_WM_WINDOW_OPACITY");
-	opacity[0] = opacity[1] = opacity[2] = opacity[3] = 0xff;
-
-	xcb_change_property(conn, XCB_PROP_MODE_REPLACE, win,
-			    _NET_WM_WINDOW_OPACITY, XCB_ATOM_CARDINAL, 32, 1, opacity);
-
-	_NET_WM_STATE = get_x11_atom("_NET_WM_STATE");
-	_NET_WM_STATE_FULLSCREEN = get_x11_atom("_NET_WM_STATE_FULLSCREEN");
-	xcb_change_property(conn, XCB_PROP_MODE_REPLACE, win,
-			    _NET_WM_STATE, XCB_ATOM_ATOM, 32, 1, &_NET_WM_STATE_FULLSCREEN);
-
-	xcb_change_window_attributes(conn, win, XCB_CW_CURSOR, &cursor_crosshair);
-	xcb_map_window(conn, win);
-	xcb_flush(conn);
-}
-
 int
-main(void)
+main()
 {
-	xwininit();
+	struct pdf *pdf;
+
+	pdf = (struct pdf*) malloc(sizeof(struct pdf));
+	
+	static const char title[] = "pdfmux";
+	pdf->conn = xcb_connect(0, 0);
+
+	if (xcb_connection_has_error(pdf->conn)) {
+		return -1;
+	}
+
+	pdf->window = xcb_generate_id(pdf->conn);
+
+	uint32_t window_values[] = {
+		XCB_EVENT_MASK_EXPOSURE |
+		XCB_EVENT_MASK_STRUCTURE_NOTIFY |
+		XCB_EVENT_MASK_KEY_PRESS
+	};
+
+	xcb_screen_iterator_t iter = xcb_setup_roots_iterator(xcb_get_setup(pdf->conn));
+
+	xcb_create_window(pdf->conn, XCB_COPY_FROM_PARENT, pdf->window, iter.data->root,
+			  0, 0, 1024, 768, 0, XCB_WINDOW_CLASS_INPUT_OUTPUT,
+			  iter.data->root_visual, XCB_CW_EVENT_MASK, window_values);
+
+	pdf->atom_wm_protocols = get_atom(pdf->conn, "WM_PROTOCOLS");
+	pdf->atom_wm_delete_window = get_atom(pdf->conn, "WM_DELETE_WINDOW");
+	
+	xcb_change_property(pdf->conn, XCB_PROP_MODE_REPLACE, pdf->window, pdf->atom_wm_protocols,
+			    XCB_ATOM_ATOM, 32, 1, &pdf->atom_wm_delete_window);
+
+	xcb_change_property(pdf->conn, XCB_PROP_MODE_REPLACE, pdf->window, get_atom(pdf->conn, "_NET_WM_NAME"),
+			    get_atom(pdf->conn, "UTF8_STRING"), 8, strlen(title), title);
+
+	xcb_map_window(pdf->conn, pdf->window);
+
+	xcb_flush(pdf->conn);
+	
 	return 0;
+
 }
