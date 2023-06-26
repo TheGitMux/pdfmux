@@ -14,6 +14,18 @@
 #define WINDOW_MANAGER_DELETE_WINDOW_PROTOCOL_NAME "WM_DELETE_WINDOW"
 #define WINDOW_MANAGER_DELETE_WINDOW_PROTOCOL_NAME_LENGTH 16
 
+static xcb_gc_t gc_font_get (xcb_connection_t *c,
+                             xcb_screen_t     *screen,
+                             xcb_window_t      window,
+                             const char       *font_name);
+
+static void text_draw (xcb_connection_t *c,
+                       xcb_screen_t     *screen,
+                       xcb_window_t      window,
+                       int16_t           x1,
+                       int16_t           y1,
+                       const char       *label);
+
 static void
 process_event(xcb_generic_event_t *generic_event, bool *is_running, xcb_window_t window,
 	      xcb_atom_t window_manager_window_delete_protocol)
@@ -36,6 +48,84 @@ process_event(xcb_generic_event_t *generic_event, bool *is_running, xcb_window_t
 		}
          } break;
 	}
+}
+
+static void
+text_draw(xcb_connection_t *c, xcb_screen_t *s, xcb_window_t w,
+	  int16_t x1, int16_t y1, const char *label)
+{
+	xcb_void_cookie_t	cookie_gc;
+	xcb_void_cookie_t	cookie_text;
+	xcb_generic_error_t	*error;
+	xcb_gcontext_t		gc;
+	uint8_t			length;
+
+	length = strlen(label);
+
+	gc = gc_font_get(c, s, w, "7x13");
+
+	cookie_text = xcb_image_text_8_checked(c, length, w, gc,
+					       x1, y1, label);
+	error = xcb_request_check(c, cookie_text);
+	if (error) {
+		fprintf(stderr, "ERROR: can't paste text: %d\n", error->error_code);
+		xcb_disconnect(c);
+		exit(-1);
+	}
+
+	cookie_gc = xcb_free_gc(c, gc);
+	error = xcb_request_check(c, cookie_gc);
+	if (error) {
+		fprintf(stderr, "ERROR: cannot free gc: %d\n", error->error_code);
+		xcb_disconnect(c);
+		exit(-1);
+	}
+}
+
+static xcb_gc_t
+gc_font_get(xcb_connection_t *c, xcb_screen_t *s,
+	    xcb_window_t w, const char *fname)
+{
+	uint32_t		value_list[3];
+	xcb_void_cookie_t	cookie_font;
+	xcb_void_cookie_t	cookie_gc;
+	xcb_generic_error_t	*error;
+	xcb_font_t		font;
+	xcb_gcontext_t		gc;
+	uint32_t		mask;
+
+	font = xcb_generate_id(c);
+	cookie_font = xcb_open_font_checked(c, font, strlen(fname), fname);
+
+	error = xcb_request_check(c, cookie_font);
+	if (error) {
+		fprintf(stderr, "ERROR: Cannot open font: %d\n", error->error_code);
+		xcb_disconnect(c);
+		return -1;
+	}
+
+	gc = xcb_generate_id(c);
+	mask = XCB_GC_FOREGROUND | XCB_GC_BACKGROUND | XCB_GC_FONT;
+	value_list[0] = s->black_pixel;
+	value_list[1] = s->white_pixel;
+	value_list[2] = font;
+	cookie_gc = xcb_create_gc_checked(c, gc, w, mask, value_list);
+	error = xcb_request_check(c, cookie_gc);
+	if (error) {
+		fprintf(stderr, "ERROR: cannot open font: %d\n", error->error_code);
+		xcb_disconnect(c);
+		exit(-1);
+	}
+    
+	cookie_font = xcb_close_font_checked(c, font);
+	error = xcb_request_check(c, cookie_font);
+	if (error) {
+		fprintf(stderr, "ERROR: cannot close font: %d\n", error->error_code);
+		xcb_disconnect(c);
+		exit(-1);
+	}
+
+	return gc;
 }
 
 int
@@ -98,6 +188,17 @@ main()
 		xcb_icccm_set_wm_size_hints(connection, window, XCB_ATOM_WM_NORMAL_HINTS, &window_size_hints);
 	}
 
+	xcb_gcontext_t gc;
+	xcb_drawable_t win;
+	uint32_t mask;
+	uint32_t value[1];
+	
+	gc = xcb_generate_id(connection);
+	mask = XCB_GC_BACKGROUND;
+	value[0] = screen->black_pixel;
+	
+	xcb_create_gc(connection, gc, win, mask, value);
+	
 	xcb_map_window(connection, window);
 	assert(xcb_flush(connection));
 
@@ -110,6 +211,8 @@ main()
 			generic_event = xcb_wait_for_event(connection);
 			assert(generic_event);
 			process_event(generic_event, &is_running, window, window_manager_window_delete_protocol);
+			char *text = "Press ESC to exit...";
+			text_draw(connection, screen, window, 10, 300, text);
 		} else {
 			while ((generic_event = xcb_poll_for_event(connection))) {
 				process_event(generic_event, &is_running, window, window_manager_window_delete_protocol);
