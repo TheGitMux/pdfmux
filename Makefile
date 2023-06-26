@@ -4,7 +4,7 @@ BASE_C_GLOBS = $(wildcard *.c)
 BASE_OBJ_GLOBS = $(BASE_C_GLOBS:.c=.o)
 
 CFLAGS = -Os -g -Werror
-LDFLAGS = -ldjvulibre -lmupdf -lSDL -lm -ljpeg -lfreetype -lz -lharfbuzz -lmupdf-third -ljbig2dec -lgumbo -lopenjp2 -lxcb -lxcb-util
+LDFLAGS = -ldjvulibre -lmupdf -lSDL -lm -ljpeg -lfreetype -lz -lharfbuzz -lmupdf-third -ljbig2dec -lgumbo -lopenjp2 -lxcb -lxcb-util -lvulkan -lxcb-util -lxcb-icccm
 
 
 CC_CMD = $(CC) -c -o $@ $< $(CFLAGS)

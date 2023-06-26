@@ -1,133 +1,124 @@
-#include <stdbool.h>
 #include <stdlib.h>
-#include <stdio.h>
+#include <assert.h>
 #include <string.h>
-
-#include <xf86drm.h>
-#include <xf86drmMode.h>
-#include <png.h>
+#include <stdbool.h>
+#include <stdio.h>
 
 #include <xcb/xcb.h>
-#include <vulkan/vulkan.h>
-#define VK_USE_PLATFORM_XCB_KHR
-#define MAX_NUM_IMAGES 5
+#include <xcb/xcb_util.h>
+#include <xcb/xcb_icccm.h>
 
-struct vkcube_buffer {
-	struct gbm_bo *gbm_bo;
-	VkDeviceMemory mem;
-	VkImage image;
-	VkImageView view;
-	VkFramebuffer framebuffer;
-	VkFence fence;
-	VkCommandBuffer cmd_buffer;
+#define WINDOW_MANAGER_PROTOCOLS_PROPERTY_NAME "WM_PROTOCOLS"
+#define WINDOW_MANAGER_PROTOCOLS_PROPERTY_NAME_LENGTH 12
 
-	uint32_t fb;
-	uint32_t stride;
-};
+#define WINDOW_MANAGER_DELETE_WINDOW_PROTOCOL_NAME "WM_DELETE_WINDOW"
+#define WINDOW_MANAGER_DELETE_WINDOW_PROTOCOL_NAME_LENGTH 16
 
-struct pdf {
-	xcb_connection_t	*conn;
-	xcb_window_t		window;
-	xcb_atom_t		atom_wm_protocols;
-	xcb_atom_t		atom_wm_delete_window;
-
-	bool			protected;
-
-	struct {
-		VkDisplayModeKHR display_mode;
-	} khr;
-
-	VkSwapchainKHR		swap_chain;
-
-	drmModeCrtc		*crtc;
-	drmModeConnector	*connector;
-	uint32_t width, height;
-
-	VkInstance instance;
-	VkPhysicalDevice physical_device;
-	VkPhysicalDeviceMemoryProperties	memory_properties;
-	VkDevice device;
-	VkRenderPass render_pass;
-	VkQueue queue;
-	VkPipelineLayout pipeline_layout;
-	VkPipeline pipeline;
-	VkDeviceMemory mem;
-	VkBuffer buffer;
-	VkDescriptorSet descriptor_set;
-	VkSemaphore sempahore;
-	VkCommandPool cmd_pool;
-
-	void *map;
-	uint32_t vertex_offset, colors_offset, normals_offset;
-
-	struct timeval start_tv;
-	VkSurfaceKHR surface;
-	VkFormat image_format;
-	struct vkcube_buffer buffers[MAX_NUM_IMAGES];
-	uint32_t image_count;
-	int current;
-};
-
-static xcb_atom_t
-get_atom(struct xcb_connection_t *conn, const char *name)
+static void
+process_event(xcb_generic_event_t *generic_event, bool *is_running, xcb_window_t window,
+	      xcb_atom_t window_manager_window_delete_protocol)
 {
-	xcb_intern_atom_cookie_t	cookie;
-	xcb_intern_atom_reply_t		*reply;
-	xcb_atom_t			atom;
-
-	cookie = xcb_intern_atom(conn, 0, strlen(name), name);
-	reply = xcb_intern_atom_reply(conn, cookie, NULL);
-	if (reply) {
-		atom = reply->atom;
-	} else {
-		atom = XCB_NONE;
+	switch(XCB_EVENT_RESPONSE_TYPE(generic_event)) {
+        case XCB_CLIENT_MESSAGE: {
+		xcb_client_message_event_t *client_message_event = (xcb_client_message_event_t*) generic_event;
+		if(client_message_event->window == window) {
+			if(client_message_event->data.data32[0] == window_manager_window_delete_protocol) {
+				uint32_t timestamp_milliseconds = client_message_event->data.data32[1];
+				printf("Closed at timestamp %i ms\n", timestamp_milliseconds);
+				*is_running = false;
+			}
+		}
+        } break;
+        case XCB_EXPOSE: {
+		xcb_expose_event_t *expose_event = (xcb_expose_event_t*) generic_event;
+		if(expose_event->window == window) {
+			printf("EXPOSE: Rect(%i, %i, %i, %i)\n", expose_event->x, expose_event->y, expose_event->width, expose_event->height);
+		}
+         } break;
 	}
-
-	free(reply);
-	return atom;
 }
 
 int
 main()
 {
-	struct pdf *pdf;
+	const char *window_title = "pdfmux";
+	int16_t window_x = 0;
+	int16_t window_y = 0;
+	uint16_t window_width = 720;
+	uint16_t window_height = 480;
+	uint32_t window_background_color[] = {0, 0, 0, 255};
+	bool is_window_resizable = true;
+	bool is_wait_event = true;
 
-	pdf = (struct pdf*) malloc(sizeof(struct pdf));
-	
-	static const char title[] = "pdfmux";
-	pdf->conn = xcb_connect(0, 0);
+	int screen_number;
+	xcb_connection_t *connection = xcb_connect(NULL, &screen_number);
+	assert(!xcb_connection_has_error(connection));
 
-	if (xcb_connection_has_error(pdf->conn)) {
-		return -1;
+	xcb_intern_atom_cookie_t intern_atom_cookie;
+	xcb_intern_atom_reply_t *intern_atom_reply;
+
+	intern_atom_cookie = xcb_intern_atom(connection, true, WINDOW_MANAGER_PROTOCOLS_PROPERTY_NAME_LENGTH,
+					     WINDOW_MANAGER_PROTOCOLS_PROPERTY_NAME);
+	intern_atom_reply = xcb_intern_atom_reply(connection, intern_atom_cookie, NULL);
+	xcb_atom_t window_manager_protocols_property = intern_atom_reply->atom;
+	free(intern_atom_reply);
+
+	intern_atom_cookie = xcb_intern_atom(connection, true, WINDOW_MANAGER_DELETE_WINDOW_PROTOCOL_NAME_LENGTH,
+					     WINDOW_MANAGER_DELETE_WINDOW_PROTOCOL_NAME);
+	intern_atom_reply = xcb_intern_atom_reply(connection, intern_atom_cookie, NULL);
+	xcb_atom_t window_manager_window_delete_protocol = intern_atom_reply->atom;
+	free(intern_atom_reply);
+
+	xcb_screen_t *screen = xcb_aux_get_screen(connection, screen_number);
+
+	xcb_window_t window = xcb_generate_id(connection);
+
+	xcb_create_window_aux(connection,
+			      screen->root_depth,
+			      window,
+			      screen->root,
+			      window_x, window_y, window_width, window_height,
+			      0,
+			      XCB_WINDOW_CLASS_INPUT_OUTPUT,
+			      screen->root_visual,
+			      XCB_CW_EVENT_MASK | XCB_CW_BACK_PIXEL, &(xcb_create_window_value_list_t) {
+				      .background_pixel = window_background_color[2] | (window_background_color[1] << 8) |
+				      (window_background_color[0] << 16) | (window_background_color[3] << 24),
+				      .event_mask = XCB_EVENT_MASK_EXPOSURE,
+			      });
+
+	xcb_icccm_set_wm_name(connection, window, XCB_ATOM_STRING, 8, strlen(window_title), window_title);
+	xcb_icccm_set_wm_protocols(connection, window, window_manager_protocols_property, 1,
+				   &(xcb_atom_t) {window_manager_window_delete_protocol});
+
+	if (!is_window_resizable) {
+		xcb_size_hints_t window_size_hints;
+		xcb_icccm_size_hints_set_min_size(&window_size_hints, window_width, window_height);
+		xcb_icccm_size_hints_set_max_size(&window_size_hints, window_width, window_height);
+		xcb_icccm_set_wm_size_hints(connection, window, XCB_ATOM_WM_NORMAL_HINTS, &window_size_hints);
 	}
 
-	pdf->window = xcb_generate_id(pdf->conn);
+	xcb_map_window(connection, window);
+	assert(xcb_flush(connection));
 
-	uint32_t window_values[] = {
-		XCB_EVENT_MASK_EXPOSURE |
-		XCB_EVENT_MASK_STRUCTURE_NOTIFY |
-		XCB_EVENT_MASK_KEY_PRESS
-	};
+	bool is_running = true;
 
-	xcb_screen_iterator_t iter = xcb_setup_roots_iterator(xcb_get_setup(pdf->conn));
+	xcb_generic_event_t *generic_event;
 
-	xcb_create_window(pdf->conn, XCB_COPY_FROM_PARENT, pdf->window, iter.data->root,
-			  0, 0, 1024, 768, 0, XCB_WINDOW_CLASS_INPUT_OUTPUT,
-			  iter.data->root_visual, XCB_CW_EVENT_MASK, window_values);
+	while (is_running) {
+		if (is_wait_event) {
+			generic_event = xcb_wait_for_event(connection);
+			assert(generic_event);
+			process_event(generic_event, &is_running, window, window_manager_window_delete_protocol);
+		} else {
+			while ((generic_event = xcb_poll_for_event(connection))) {
+				process_event(generic_event, &is_running, window, window_manager_window_delete_protocol);
+			}
+		}
 
-	pdf->atom_wm_protocols = get_atom(pdf->conn, "WM_PROTOCOLS");
-	pdf->atom_wm_delete_window = get_atom(pdf->conn, "WM_DELETE_WINDOW");
-	
-	xcb_change_property(pdf->conn, XCB_PROP_MODE_REPLACE, pdf->window, pdf->atom_wm_protocols,
-			    XCB_ATOM_ATOM, 32, 1, &pdf->atom_wm_delete_window);
+		printf("UPDATE!\n");
+	}
 
-	xcb_change_property(pdf->conn, XCB_PROP_MODE_REPLACE, pdf->window, get_atom(pdf->conn, "_NET_WM_NAME"),
-			    get_atom(pdf->conn, "UTF8_STRING"), 8, strlen(title), title);
-
-	xcb_map_window(pdf->conn, pdf->window);
-
-	xcb_flush(pdf->conn);
-	
-	return 0;
-
+	xcb_disconnect(connection);
+	return EXIT_SUCCESS;
 }
